@@ -107,7 +107,7 @@ class MetricsAnalyzer:
         
         return host_df
     
-    def detect_anomalies(self, host_name, calm_period_hours=2):
+    def detect_anomalies(self, host_name, calm_period_hours=0.08):
         """Обнаружение аномалий на основе статистики спокойного периода"""
         host_df = self.df[self.df['host_name'] == host_name].copy()
         host_df = self.calculate_derived_features(host_df)
@@ -121,10 +121,10 @@ class MetricsAnalyzer:
             calm_df = host_df
             print(f"  Используем все данные для определения порогов (мало данных)")
         
-        # Вычисляем пороги (среднее + 2*std)
-        cpu_threshold = calm_df['cpu_total'].mean() + 2 * calm_df['cpu_total'].std()
-        mem_threshold = calm_df['mem_percent'].mean() + 2 * calm_df['mem_percent'].std()
-        load_threshold = calm_df['cpu_load'].mean() + 2 * calm_df['cpu_load'].std()
+        # Вычисляем пороги (среднее + 1.3*std)
+        cpu_threshold = calm_df['cpu_total'].mean() + 1.3 * calm_df['cpu_total'].std()
+        mem_threshold = calm_df['mem_percent'].mean() + 1.3 * calm_df['mem_percent'].std()
+        load_threshold = calm_df['cpu_load'].mean() + 1.3 * calm_df['cpu_load'].std()
         
         print(f"\n=== Пороги аномалий для {host_name} ===")
         print(f"  CPU порог: {cpu_threshold:.1f}%")

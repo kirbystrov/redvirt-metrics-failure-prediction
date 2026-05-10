@@ -9,12 +9,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, roc_auc_score
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc, roc_auc_score, precision_recall_curve, average_precision_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 import joblib
 import warnings
 warnings.filterwarnings('ignore')
+
+# Попытка импорта seaborn для красивой тепловой карты
+try:
+    import seaborn as sns
+    HAS_SEABORN = True
+except ImportError:
+    HAS_SEABORN = False
+    print("Seaborn не установлен, тепловая карта будет отрисована в базовом стиле matplotlib.")
 
 class FailurePredictor:
     def __init__(self, data_file='clean_metrics.csv'):
@@ -62,7 +70,6 @@ class FailurePredictor:
         X = self.df[self.features].fillna(0)
         y = self.df['failure_soon']
 
-        # Проверка: есть ли оба класса
         if len(y.unique()) < 2:
             print("Ошибка: в данных только один класс! Невозможно обучить модель.")
             return None
@@ -74,33 +81,30 @@ class FailurePredictor:
         print(f"Размер обучающей выборки: {len(X_train)}")
         print(f"Размер тестовой выборки: {len(X_test)}")
 
-        # TimeSeries CV с проверкой на наличие обоих классов
-        tscv = TimeSeriesSplit(n_splits=3)  # уменьшаем до 3 фолдов
+        # TimeSeries CV (может выдавать пропуски – оставляем как есть)
+        tscv = TimeSeriesSplit(n_splits=3)
         cv_scores = []
         for train_idx, test_idx in tscv.split(X):
             X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
             y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-            # Проверяем наличие обоих классов в тестовой выборке
             if len(y_te.unique()) < 2:
                 print(f"Пропуск фолда: в тестовой выборке только один класс")
                 continue
             model_cv = RandomForestClassifier(n_estimators=100, max_depth=10, min_samples_split=10, random_state=42)
             model_cv.fit(X_tr, y_tr)
-            y_proba = model_cv.predict_proba(X_te)
-            # Если classes_ = [0,1], то вероятность класса 1 во 2-м столбце
-            if y_proba.shape[1] == 2:
-                proba_class1 = y_proba[:, 1]
+            y_proba_cv = model_cv.predict_proba(X_te)
+            if y_proba_cv.shape[1] == 2:
+                proba_class1 = y_proba_cv[:, 1]
             else:
-                proba_class1 = y_proba[:, 0]  # если только один столбец (быть не должно)
+                proba_class1 = y_proba_cv[:, 0]
             score = roc_auc_score(y_te, proba_class1)
             cv_scores.append(score)
-        
         if cv_scores:
             print(f"TimeSeries CV ROC-AUC: {np.mean(cv_scores):.3f} +/- {np.std(cv_scores):.3f}")
         else:
             print("TimeSeries CV не удалась: нет фолдов с обоими классами")
 
-        # Обучение основной модели Random Forest
+        # Обучение основной модели
         self.model = RandomForestClassifier(
             n_estimators=100,
             max_depth=10,
@@ -109,11 +113,9 @@ class FailurePredictor:
         )
         self.model.fit(X_train, y_train)
 
-        # Оценка
+        # Оценка на тестовой выборке
         y_pred = self.model.predict(X_test)
         y_proba = self.model.predict_proba(X_test)
-
-        # Если classes_ = [0,1], то вероятность класса 1 во 2-м столбце
         if y_proba.shape[1] == 2:
             proba_class1 = y_proba[:, 1]
         else:
@@ -125,8 +127,8 @@ class FailurePredictor:
         print(confusion_matrix(y_test, y_pred))
 
         fpr, tpr, _ = roc_curve(y_test, proba_class1)
-        roc_auc = auc(fpr, tpr)
-        print(f"\nROC-AUC (Random Forest): {roc_auc:.3f}")
+        roc_auc_val = auc(fpr, tpr)
+        print(f"\nROC-AUC (Random Forest): {roc_auc_val:.3f}")
 
         # Важность признаков
         importance = pd.DataFrame({
@@ -136,7 +138,7 @@ class FailurePredictor:
         print("\nВажность признаков:")
         print(importance.to_string(index=False))
 
-        # Графики
+        # === Базовые графики (были и раньше) ===
         plt.figure(figsize=(10, 6))
         plt.barh(importance['feature'], importance['importance'])
         plt.xlabel('Importance')
@@ -146,7 +148,7 @@ class FailurePredictor:
         plt.close()
 
         plt.figure(figsize=(8, 6))
-        plt.plot(fpr, tpr, label=f'Random Forest (AUC = {roc_auc:.3f})')
+        plt.plot(fpr, tpr, label=f'Random Forest (AUC = {roc_auc_val:.3f})')
         plt.plot([0, 1], [0, 1], 'k--')
         plt.xlabel('False Positive Rate')
         plt.ylabel('True Positive Rate')
@@ -156,7 +158,77 @@ class FailurePredictor:
         plt.savefig('roc_curve.png', dpi=150)
         plt.close()
 
-        # Сравнение с базовыми методами
+        # === НОВЫЕ ГРАФИКИ ДЛЯ СТАТЬИ ===
+        # 1. Confusion Matrix (тепловая карта)
+        cm = confusion_matrix(y_test, y_pred)
+        if HAS_SEABORN:
+            plt.figure(figsize=(6,5))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                        xticklabels=['Normal', 'Failure'],
+                        yticklabels=['Normal', 'Failure'])
+            plt.xlabel('Predicted')
+            plt.ylabel('Actual')
+            plt.title('Confusion Matrix')
+            plt.tight_layout()
+            plt.savefig('confusion_matrix.png', dpi=150)
+            plt.close()
+        else:
+            plt.figure(figsize=(6,5))
+            plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+            plt.title('Confusion Matrix')
+            plt.colorbar()
+            tick_marks = np.arange(2)
+            plt.xticks(tick_marks, ['Normal', 'Failure'])
+            plt.yticks(tick_marks, ['Normal', 'Failure'])
+            thresh = cm.max() / 2.
+            for i, j in np.ndindex(cm.shape):
+                plt.text(j, i, format(cm[i, j], 'd'),
+                         horizontalalignment="center",
+                         color="white" if cm[i, j] > thresh else "black")
+            plt.tight_layout()
+            plt.savefig('confusion_matrix.png', dpi=150)
+            plt.close()
+
+        # 2. Распределение предсказанных вероятностей
+        plt.figure(figsize=(8,5))
+        plt.hist(proba_class1[y_test == 0], bins=30, alpha=0.5, label='Normal (class 0)')
+        plt.hist(proba_class1[y_test == 1], bins=30, alpha=0.5, label='Failure (class 1)')
+        plt.xlabel('Predicted probability of failure')
+        plt.ylabel('Frequency')
+        plt.legend()
+        plt.title('Distribution of Predicted Probabilities')
+        plt.tight_layout()
+        plt.savefig('prob_distribution.png', dpi=150)
+        plt.close()
+
+        # 3. Precision‑Recall кривая
+        precision, recall, _ = precision_recall_curve(y_test, proba_class1)
+        avg_precision = average_precision_score(y_test, proba_class1)
+        plt.figure(figsize=(8,6))
+        plt.plot(recall, precision, label=f'PR curve (AP = {avg_precision:.3f})')
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.title('Precision-Recall Curve')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('pr_curve.png', dpi=150)
+        plt.close()
+
+        # 4. Временной ряд предсказаний (если индексы datetime)
+        if isinstance(X_test.index, pd.DatetimeIndex):
+            plt.figure(figsize=(12,5))
+            plt.plot(X_test.index, y_test, 'o', label='Actual failure_soon', markersize=2)
+            plt.plot(X_test.index, proba_class1, 'x', label='Predicted probability', markersize=2)
+            plt.xlabel('Time')
+            plt.ylabel('Probability / Class')
+            plt.legend()
+            plt.title('Predictions over time (test set)')
+            plt.tight_layout()
+            plt.savefig('predictions_timeseries.png', dpi=150)
+            plt.close()
+
+        # === Сравнение с базовыми методами и тесты на устойчивость ===
         print("\n=== Сравнение с базовыми методами ===")
         for name, clf in [('LogisticRegression', LogisticRegression(max_iter=1000, random_state=42)),
                           ('SVM (линейное ядро)', SVC(kernel='linear', probability=True, random_state=42))]:
@@ -169,7 +241,6 @@ class FailurePredictor:
             auc_clf = roc_auc_score(y_test, proba_clf)
             print(f"{name}: ROC-AUC = {auc_clf:.3f}")
 
-        # Устойчивость к шуму
         print("\n=== Устойчивость к шуму ===")
         noise_levels = [0, 0.05, 0.10]
         for noise in noise_levels:
@@ -189,7 +260,6 @@ class FailurePredictor:
             auc_noise = roc_auc_score(yn_test, proba_noise)
             print(f"Шум {noise*100:.0f}%: ROC-AUC = {auc_noise:.3f}")
 
-        # Устойчивость к пропущенным значениям
         print("\n=== Устойчивость к пропущенным значениям ===")
         missing_frac = [0, 0.05, 0.10]
         for miss in missing_frac:
@@ -212,7 +282,6 @@ class FailurePredictor:
 
     def save_model(self, filename='failure_model.joblib'):
         try:
-            import joblib
             joblib.dump(self.model, filename)
             print(f"\nМодель сохранена в {filename}")
         except ImportError:
@@ -238,7 +307,7 @@ if __name__ == "__main__":
         '2026-05-09 14:41:48',
         '2026-05-09 14:51:52',
         '2026-05-09 15:17:57',
-        # Нагрузка на память (3 события) – тоже включим
+        # Нагрузка на память (3 события)
         '2026-05-09 15:00:20',
         '2026-05-09 15:08:11',
         '2026-05-09 15:25:21',
@@ -254,5 +323,10 @@ if __name__ == "__main__":
     print("Созданы файлы:")
     print("  - feature_importance.png")
     print("  - roc_curve.png")
+    print("  - confusion_matrix.png")
+    print("  - prob_distribution.png")
+    print("  - pr_curve.png")
+    if predictor.df.index.inferred_type == 'datetime64':
+        print("  - predictions_timeseries.png")
     print("  - failure_model.joblib")
     print("="*60)
