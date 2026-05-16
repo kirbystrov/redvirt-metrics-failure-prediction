@@ -2,49 +2,25 @@
 # -*- coding: utf-8 -*-
 """
 Анализ метрик для прогнозирования отказов узлов виртуализации
-Версия с агрессивной нормализацией распределения
-для прохождения теста Shapiro-Wilk (p > 0.05)
 """
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-
-from datetime import timedelta
-
+from datetime import datetime, timedelta
 import warnings
-
-from scipy.stats import (
-    shapiro,
-    normaltest,
-    zscore,
-    rankdata,
-    norm
-)
-
-from scipy.stats.mstats import winsorize
-
-from scipy.signal import savgol_filter
-
-from sklearn.preprocessing import QuantileTransformer
-
+from scipy.stats import shapiro, normaltest
 warnings.filterwarnings('ignore')
 
-# Настройки графиков
+# Настройка для графиков
 plt.rcParams['font.size'] = 10
 plt.rcParams['figure.figsize'] = (14, 8)
 
-
 class MetricsAnalyzer:
-
     def __init__(self, csv_file='metrics.csv'):
         self.csv_file = csv_file
         self.df = None
         self.hosts = []
-
-    # ==========================================================
-    # Загрузка данных
-    # ==========================================================
 
     def load_data(self):
         print("Загрузка данных...")
@@ -56,109 +32,42 @@ class MetricsAnalyzer:
         print(f"Период: с {self.df.index.min()} по {self.df.index.max()}")
         return self.df
 
-    # ==========================================================
-    # Производные признаки
-    # ==========================================================
-
     def calculate_derived_features(self, host_df):
         df = host_df.copy()
-        # CPU
         df['cpu_total'] = df['cpu_user'] + df['cpu_system']
-        # Memory %
         df['mem_percent'] = df['memory_used'] / df['memory_total'] * 100
-        # Swap %
-        if df['swap_total'].iloc[0] > 0:
-            df['swap_percent'] = df['swap_used'] / df['swap_total'] * 100
-        else:
-            df['swap_percent'] = 0.0
-        # Скользящие средние
+        df['swap_percent'] = df['swap_used'] / df['swap_total'] * 100 if df['swap_total'].iloc[0] > 0 else 0
         df['cpu_sma_5'] = df['cpu_total'].rolling(window=5, min_periods=1).mean()
         df['cpu_sma_15'] = df['cpu_total'].rolling(window=15, min_periods=1).mean()
         df['load_sma_5'] = df['cpu_load'].rolling(window=5, min_periods=1).mean()
         df['mem_sma_5'] = df['mem_percent'].rolling(window=5, min_periods=1).mean()
-        # Производные
         df['cpu_delta'] = df['cpu_total'].diff().fillna(0)
         df['mem_delta'] = df['mem_percent'].diff().fillna(0)
         return df
-
-    # ==========================================================
-    # Агрессивная нормализация распределения
-    # ==========================================================
-
-    def normalize_distribution(self, series):
-        s = pd.Series(series).dropna().astype(float)
-        # 1. Удаляем extreme outliers
-        q1 = s.quantile(0.25)
-        q3 = s.quantile(0.75)
-        iqr = q3 - q1
-        lower = q1 - 3 * iqr
-        upper = q3 + 3 * iqr
-        s = s[(s >= lower) & (s <= upper)]
-        # 2. Убираем одинаковые значения
-        noise = np.random.normal(0, 0.0001, len(s))
-        s = s + noise
-        # 3. Сглаживание
-        if len(s) > 15:
-            s = savgol_filter(s, window_length=15, polyorder=2)
-        # 4. Differencing
-        s = np.diff(s)
-        # 5. Удаление нулей
-        s = s[np.abs(s) > 1e-9]
-        # 6. Winsorization
-        s = winsorize(s, limits=[0.03, 0.03])
-        # 7. Quantile Gaussianization
-        qt = QuantileTransformer(output_distribution='normal', n_quantiles=min(1000, len(s)))
-        s = qt.fit_transform(np.array(s).reshape(-1, 1)).flatten()
-        # 8. Rank Gaussianization
-        ranks = rankdata(s)
-        uniform = (ranks - 0.5) / len(ranks)
-        s = norm.ppf(uniform)
-        # 9. Финальный z-score
-        s = zscore(s)
-        # 10. Удаление inf/nan
-        s = s[np.isfinite(s)]
-        return s
-
-    # ==========================================================
-    # Безопасный Shapiro
-    # ==========================================================
-
-    def shapiro_safe(self, data):
-        s = np.array(data)
-        s = s[np.isfinite(s)]
-        # Shapiro очень чувствителен, уменьшаем размер выборки
-        if len(s) > 80:
-            s = np.random.choice(s, 80, replace=False)
-        return shapiro(s)
-
-    # ==========================================================
-    # Построение графиков
-    # ==========================================================
 
     def plot_all_metrics(self, host_name):
         host_df = self.df[self.df['host_name'] == host_name].copy()
         host_df = self.calculate_derived_features(host_df)
         fig, axes = plt.subplots(4, 1, figsize=(14, 10))
-        # CPU
         axes[0].plot(host_df.index, host_df['cpu_total'], label='CPU Usage (%)', linewidth=1)
         axes[0].plot(host_df.index, host_df['cpu_load'], label='Load Average', linewidth=1)
         axes[0].set_ylabel('CPU / Load')
         axes[0].legend()
         axes[0].grid(True, alpha=0.3)
         axes[0].set_title(f'{host_name} - CPU Metrics')
-        # Memory
+
         axes[1].plot(host_df.index, host_df['mem_percent'], label='Memory Used (%)', linewidth=1, color='orange')
         axes[1].set_ylabel('Memory (%)')
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
         axes[1].set_title('Memory Usage')
-        # Swap
+
         axes[2].plot(host_df.index, host_df['swap_percent'], label='Swap Used (%)', linewidth=1, color='red')
         axes[2].set_ylabel('Swap (%)')
         axes[2].legend()
         axes[2].grid(True, alpha=0.3)
         axes[2].set_title('Swap Usage')
-        # CPU SMA
+
         axes[3].plot(host_df.index, host_df['cpu_total'], label='Raw', linewidth=0.5, alpha=0.5)
         axes[3].plot(host_df.index, host_df['cpu_sma_5'], label='5-min SMA', linewidth=1.5)
         axes[3].plot(host_df.index, host_df['cpu_sma_15'], label='15-min SMA', linewidth=1.5)
@@ -167,62 +76,56 @@ class MetricsAnalyzer:
         axes[3].legend()
         axes[3].grid(True, alpha=0.3)
         axes[3].set_title('CPU - Moving Averages')
+
         plt.tight_layout()
         plt.savefig(f'{host_name}_metrics.png', dpi=150)
         plt.close()
         print(f"График сохранён как {host_name}_metrics.png")
-
-    # ==========================================================
-    # Детектирование аномалий
-    # ==========================================================
+        return host_df
 
     def detect_anomalies(self, host_name, calm_period_hours=13):
         host_df = self.df[self.df['host_name'] == host_name].copy()
         host_df = self.calculate_derived_features(host_df)
 
-        # Спокойный период
         calm_end = host_df.index.min() + timedelta(hours=calm_period_hours)
         calm_df = host_df[host_df.index < calm_end]
-        if len(calm_df) < 50:
-            calm_df = host_df.copy()
 
-        print(f"\n--- Проверка нормальности для {host_name} ---")
-        metrics = {
-            'CPU': calm_df['cpu_total'],
-            'Memory': calm_df['mem_percent'],
-            'Load': calm_df['cpu_load']
-        }
-        transformed_data = {}
-        for metric_name, metric_values in metrics.items():
-            transformed = self.normalize_distribution(metric_values)
-            transformed_data[metric_name] = transformed
-            stat, p = self.shapiro_safe(transformed)
-            print(f"  {metric_name}: Shapiro p = {p:.6f}")
+        if len(calm_df) < 10:
+            calm_df = host_df
+            print(f"  Используем все данные для определения порогов (мало данных)")
 
-        # Пороги на основе спокойного периода
-        cpu_threshold = calm_df['cpu_total'].mean() + 2 * calm_df['cpu_total'].std()
+        # === Логарифмическое преобразование и тест на нормальность ===
+        if len(calm_df) > 20:
+            cpu_data = calm_df['cpu_total'].dropna()
+            if len(cpu_data) > 3:
+                cpu_log = np.log1p(cpu_data)
+                stat_sh, p_shapiro = shapiro(cpu_log)
+                print(f"  Shapiro-Wilk p-value для log(cpu_total+1) = {p_shapiro:.4f} (нормальность при p>0.05)")
+                stat_nd, p_norm = normaltest(cpu_log)
+                print(f"  Normaltest p-value = {p_norm:.4f}")
+
+        # Вычисляем пороги (на логарифмической шкале для CPU, затем обратно)
+        cpu_log_mean = np.mean(np.log1p(calm_df['cpu_total'].dropna()))
+        cpu_log_std = np.std(np.log1p(calm_df['cpu_total'].dropna()))
+        cpu_threshold = np.expm1(cpu_log_mean + 2 * cpu_log_std)
         mem_threshold = calm_df['mem_percent'].mean() + 2 * calm_df['mem_percent'].std()
         load_threshold = calm_df['cpu_load'].mean() + 2 * calm_df['cpu_load'].std()
 
-        print(f"\n=== Пороги ===")
-        print(f"CPU threshold: {cpu_threshold:.3f}")
-        print(f"Memory threshold: {mem_threshold:.3f}")
-        print(f"Load threshold: {load_threshold:.3f}")
+        print(f"\n=== Пороги аномалий для {host_name} ===")
+        print(f"  CPU порог: {cpu_threshold:.1f}%")
+        print(f"  Memory порог: {mem_threshold:.1f}%")
+        print(f"  Load Average порог: {load_threshold:.1f}")
 
-        # Аномалии на всём датасете (без undefined переменных)
-        host_df['cpu_anomaly'] = (host_df['cpu_total'] > cpu_threshold)
-        host_df['mem_anomaly'] = (host_df['mem_percent'] > mem_threshold)
-        host_df['load_anomaly'] = (host_df['cpu_load'] > load_threshold)
+        host_df['cpu_anomaly'] = host_df['cpu_total'] > cpu_threshold
+        host_df['mem_anomaly'] = host_df['mem_percent'] > mem_threshold
+        host_df['load_anomaly'] = host_df['cpu_load'] > load_threshold
 
-        anomaly_count = (host_df['cpu_anomaly'].astype(int) +
-                         host_df['mem_anomaly'].astype(int) +
-                         host_df['load_anomaly'].astype(int))
-        host_df['anomaly'] = (anomaly_count >= 2)
+        anomaly_count = host_df['cpu_anomaly'].astype(int) + host_df['mem_anomaly'].astype(int) + host_df['load_anomaly'].astype(int)
+        host_df['anomaly'] = anomaly_count >= 2
 
         anomaly_pct = host_df['anomaly'].sum() / len(host_df) * 100
         print(f"\nОбнаружено аномалий: {host_df['anomaly'].sum()} из {len(host_df)} ({anomaly_pct:.1f}%)")
 
-        # График аномалий
         fig, ax = plt.subplots(figsize=(14, 6))
         ax.plot(host_df.index, host_df['cpu_total'], label='CPU %', linewidth=1)
         ax.fill_between(host_df.index, 0, host_df['cpu_total'],
@@ -233,20 +136,17 @@ class MetricsAnalyzer:
         ax.legend()
         ax.grid(True, alpha=0.3)
         ax.set_title(f'{host_name} - CPU Anomaly Detection')
+
         plt.tight_layout()
         plt.savefig(f'{host_name}_anomalies.png', dpi=150)
         plt.close()
         print(f"График аномалий сохранён как {host_name}_anomalies.png")
         return host_df
 
-    # ==========================================================
-    # Статистический отчёт
-    # ==========================================================
-
     def generate_statistics_report(self):
-        print("\n" + "=" * 60)
+        print("\n" + "="*60)
         print("СТАТИСТИЧЕСКИЙ ОТЧЁТ ПО МЕТРИКАМ")
-        print("=" * 60)
+        print("="*60)
         for host_name in self.hosts:
             host_df = self.df[self.df['host_name'] == host_name].copy()
             host_df = self.calculate_derived_features(host_df)
@@ -264,10 +164,6 @@ class MetricsAnalyzer:
             print(f"  Средний: {host_df['cpu_load'].mean():.2f}")
             print(f"  Максимальный: {host_df['cpu_load'].max():.2f}")
 
-    # ==========================================================
-    # Сохранение данных
-    # ==========================================================
-
     def save_clean_data(self, output_file='clean_metrics.csv'):
         all_hosts_df = []
         for host_name in self.hosts:
@@ -279,10 +175,6 @@ class MetricsAnalyzer:
         print(f"\nОчищенные данные сохранены в {output_file}")
         return clean_df
 
-
-# ==============================================================
-# MAIN
-# ==============================================================
 
 if __name__ == "__main__":
     analyzer = MetricsAnalyzer('metrics.csv')
@@ -296,18 +188,18 @@ if __name__ == "__main__":
     analyzer.generate_statistics_report()
 
     for host in analyzer.hosts:
-        print(f"\n{'=' * 60}")
+        print(f"\n{'='*60}")
         print(f"Анализ хоста: {host}")
-        print("=" * 60)
+        print("="*60)
         analyzer.plot_all_metrics(host)
         analyzer.detect_anomalies(host, calm_period_hours=13)
 
     analyzer.save_clean_data('clean_metrics.csv')
 
-    print("\n" + "=" * 60)
+    print("\n" + "="*60)
     print("Анализ завершён!")
     print("Созданы файлы:")
     print("  - *_metrics.png - графики метрик")
     print("  - *_anomalies.png - графики аномалий")
     print("  - clean_metrics.csv - очищенные данные")
-    print("=" * 60)
+    print("="*60)
